@@ -36,6 +36,11 @@ extern "C" {
 #define ADS1235_REG_PGA           0x10
 #define ADS1235_REG_INPMUX        0x11
 
+/* REF register: RMUXP[3:2] + RMUXN[1:0] (see datasheet / TI ads1235.h). */
+#define ADS1235_REF_AVDD_AVSS     0x05u /* Vref+ = AVDD, Vref- = AVSS (default after reset) */
+#define ADS1235_REF_REFP0_REFN0   0x0Au /* Vref+ = REFP0 pin, Vref- = REFN0 pin (external) */
+#define ADS1235_REF_REFP0_AVSS    0x09u /* REFP0 pin, AVSS (e.g. REFP tied to VDD, REFN to GND) */
+
 /* MODE0: DR[6:3] data rate, FILTER[2:0] (000=sinc1 .. 011=sinc4, 100=FIR). */
 #define ADS1235_MODE0_10SPS_FIR    0x14u
 #define ADS1235_MODE0_20SPS_FIR    0x24u  /* power-on default */

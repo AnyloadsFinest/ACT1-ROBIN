@@ -155,9 +155,14 @@ static esp_err_t spi_bus_init(void)
         .sclk_io_num = CONFIG_EXAMPLE_ETH_SPI_SCLK_GPIO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        .max_transfer_sz = 4096,
     };
-    ESP_GOTO_ON_ERROR(spi_bus_initialize(CONFIG_EXAMPLE_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO),
-                        err, TAG, "SPI host #%d init failed", CONFIG_EXAMPLE_ETH_SPI_HOST);
+    ret = spi_bus_initialize(CONFIG_EXAMPLE_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "SPI host #%d already initialized (shared bus)", CONFIG_EXAMPLE_ETH_SPI_HOST);
+        ret = ESP_OK;
+    }
+    ESP_GOTO_ON_ERROR(ret, err, TAG, "SPI host #%d init failed", CONFIG_EXAMPLE_ETH_SPI_HOST);
 
 err:
     return ret;

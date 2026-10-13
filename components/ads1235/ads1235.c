@@ -52,10 +52,12 @@ esp_err_t ads1235_init(const ads1235_config_t *config, ads1235_handle_t *handle)
         .sclk_io_num = config->sclk_pin,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 16,
+        /* Shared with W5500 on SPI2; W5500 MAC reads full Ethernet frames via SPI DMA. */
+        .max_transfer_sz = 4096,
     };
 
-    esp_err_t err = spi_bus_initialize(config->spi_host, &buscfg, SPI_DMA_DISABLED);
+    /* DMA required: with SPI_DMA_DISABLED, IDF caps transfers at SOC_SPI_MAXIMUM_BUFFER_SIZE (64 on S3). */
+    esp_err_t err = spi_bus_initialize(config->spi_host, &buscfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(err));
         return err;
@@ -278,13 +280,19 @@ esp_err_t ads1235_default_init(ads1235_handle_t *handle)
     }
     ESP_LOGI(TAG, "ADS1235 detected, ID=0x%02x", id);
 
-    /* 10 SPS FIR: slower, quieter readings; good 50/60 Hz rejection. */
+    /* 10 SPS FIR: quieter readings; good 50/60 Hz rejection. */
     err = ads1235_stop(handle);
     if (err != ESP_OK) {
         return err;
     }
 
     err = ads1235_write_reg(handle, ADS1235_REG_MODE0, ADS1235_MODE0_10SPS_FIR);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* External reference on REFP0/REFN0 (board: VREF / REFP tied to VDD, REFN to GND). */
+    err = ads1235_write_reg(handle, ADS1235_REG_REF, ADS1235_REF_REFP0_REFN0);
     if (err != ESP_OK) {
         return err;
     }
@@ -300,8 +308,13 @@ esp_err_t ads1235_default_init(ads1235_handle_t *handle)
     }
     vTaskDelay(pdMS_TO_TICKS(1));
 
+    uint8_t ref = 0;
     uint8_t pga = 0;
     uint8_t mux = 0;
+    err = ads1235_read_reg(handle, ADS1235_REG_REF, &ref);
+    if (err != ESP_OK) {
+        return err;
+    }
     err = ads1235_read_reg(handle, ADS1235_REG_PGA, &pga);
     if (err != ESP_OK) {
         return err;
@@ -315,8 +328,9 @@ esp_err_t ads1235_default_init(ads1235_handle_t *handle)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "MODE0=0x%02x (10 SPS FIR)", mode0);
     }
-    ESP_LOGI(TAG, "PGA=0x%02x INPMUX=0x%02x (expect PGA=0x06 INPMUX=0x78)", pga, mux);
-    if (pga != 0x06 || mux != 0x78) {
+    ESP_LOGI(TAG, "REF=0x%02x (expect 0x0A REFP0/REFN0)  PGA=0x%02x  INPMUX=0x%02x",
+             ref, pga, mux);
+    if (ref != ADS1235_REF_REFP0_REFN0 || pga != 0x06 || mux != 0x78) {
         ESP_LOGW(TAG, "register readback mismatch (continuing anyway)");
     }
 

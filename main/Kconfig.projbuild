@@ -1,3 +1,50 @@
+menu "ACT1-ROBIN"
+
+    config ACT1_SKIP_ADC
+        bool "Skip ADS1235 / scale SPI (W5500 isolation test)"
+        default n
+        help
+            Do not init ADS1235 on SPI2. Brings up W5500 Ethernet first on a fresh SPI bus.
+            For hardware debug only — no weight readings.
+
+    config ACT1_ETH_PHY_MONITOR
+        bool "Periodic W5500 PHYCFGR / link log (plug/unplug debug)"
+        default n
+        help
+            Logs PHY link bit and INT GPIO every few seconds until link comes up.
+            robin_eth still logs Ethernet link up/down when the PHY reports a change.
+
+    config ACT1_RS485_BENCH_HEARTBEAT
+        bool "RS485 bench heartbeat (ACT1-RS485 line every 2s when F7.2 OFF)"
+        default n
+        help
+            Sends \"ACT1-RS485\\r\\n\" on the RS485 bus for USB-adapter bring-up.
+            Disable for production or when Modbus/ASCII is active.
+
+    config ACT1_CAN_BENCH_BEACON
+        bool "CAN bench beacon (1 Hz standard frame for PCAN / bus sniffer)"
+        default n
+        help
+            When F7.3 CAN protocol is OFF, transmits ID 0x7FE once per second
+            (8 data bytes: 'ACT1' + tick counter). Disable for production / shared bus.
+
+    config ACT1_DOUT_BENCH_TOGGLE
+        bool "DOUT bench toggle (AQY282SX IO38/39/40 high/low, see BOARD_DOUT_BENCH_TOGGLE_MS)"
+        default n
+        help
+            Overrides F5 outputs and F8 TEST OUT. Toggles all three PhotoMOS
+            drive lines together (default 10 s per state in board.h) for bring-up.
+            Disable for production.
+
+    config ACT1_DI_BENCH_LOG
+        bool "DI bench log (IN1/IN2 OPEN/CLSD on serial monitor)"
+        default y
+        help
+            Logs digital input state on change and every 2 s (ISO1212 / IO19 IO20).
+            Includes raw GPIO levels for bring-up.
+
+endmenu
+
 menu "Example Configuration"
     config EXAMPLE_ETH_DEINIT_AFTER_S
         int "Stop and deinit Ethernet after elapsing number of secs"

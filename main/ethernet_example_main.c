@@ -28,6 +28,9 @@ static const char *TAG = "eth_example";
 #define CAL_SAMPLE_COUNT 12
 
 static ads1235_handle_t s_ads1235;
+static esp_console_repl_t *s_console_repl = NULL;
+static bool s_console_repl_running = false;
+static bool s_console_repl_paused_for_cal = false;
 static volatile bool s_adc_stream_log = false;
 static volatile bool s_weight_stream = false;
 static volatile bool s_weight_log_verbose = false;
@@ -63,14 +66,43 @@ static bool console_read_line(const char *prompt, char *line, size_t line_size)
         printf("%s", prompt);
         fflush(stdout);
     }
-    if (fgets(line, (int)line_size, stdin) == NULL) {
-        return false;
+
+    /* REPL must be stopped (cal wizard) so stdin is available. Echo typed chars. */
+    size_t pos = 0;
+    line[0] = '\0';
+    for (int attempt = 0; attempt < 6000; attempt++) {
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (c == 0x03) {
+            return false;
+        }
+        if (c == '\r' || c == '\n') {
+            putchar('\n');
+            fflush(stdout);
+            line[pos] = '\0';
+            return true;
+        }
+        if (c == 0x08 || c == 0x7f) {
+            if (pos > 0) {
+                pos--;
+                line[pos] = '\0';
+                fputs("\b \b", stdout);
+                fflush(stdout);
+            }
+            continue;
+        }
+        if (pos + 1 >= line_size) {
+            continue;
+        }
+        line[pos++] = (char)c;
+        line[pos] = '\0';
+        putchar(c);
+        fflush(stdout);
     }
-    size_t len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-        line[--len] = '\0';
-    }
-    return true;
+    return false;
 }
 
 static bool console_wait_enter(const char *prompt)
@@ -245,19 +277,20 @@ static esp_err_t run_scale_calibration(void)
     }
     printf("Zero captured: raw=%ld\n\n", (long)zero_raw);
 
-    if (!console_read_line("Step 2/2 SPAN: Enter known weight in grams (e.g. 500): ", line, sizeof(line))) {
+    if (!console_read_line("Step 2/2 SPAN: Enter test weight in grams (e.g. 500): ",
+                           line, sizeof(line))) {
         printf("Input cancelled.\n");
         s_cal_in_progress = false;
         return ESP_ERR_INVALID_STATE;
     }
     span_grams = strtof(line, NULL);
     if (span_grams <= 0.0f) {
-        printf("Invalid span weight.\n");
+        printf("Invalid span weight — type a number greater than 0 (e.g. 500).\n");
         s_cal_in_progress = false;
         return ESP_ERR_INVALID_ARG;
     }
 
-    printf("Place %.2f g on the scale.\n", (double)span_grams);
+    printf("\nUsing %.0f g for span. Place that weight on the scale.\n", (double)span_grams);
     if (!console_wait_enter("Press Enter when span weight is stable... ")) {
         printf("Input cancelled.\n");
         s_cal_in_progress = false;
@@ -284,6 +317,8 @@ static esp_err_t run_scale_calibration(void)
     s_cal.grams_per_count = span_grams / delta;
     s_cal.valid = true;
     s_weight_stream = true;
+    s_weight_log_quiet = true;
+    s_weight_log_verbose = false;
     s_cal_in_progress = false;
     weight_set_cal_zero_raw(zero_raw);
     raw_roll_reset();
@@ -293,9 +328,11 @@ static esp_err_t run_scale_calibration(void)
     printf("  zero raw=%ld  span raw=%ld  (delta=%.0f counts)\n",
            (long)zero_raw, (long)span_raw, (double)delta);
     printf("  scale=%.8f g/count\n", (double)s_cal.grams_per_count);
-    printf("Streaming weight (g). Commands: filter on | filter level 0-5 | cal\n\n");
+    printf("Streaming weight (~1 line/s). Type 'stream off' at act1> to stop, or 'stream on' for more.\n\n");
     return ESP_OK;
 }
+
+static uint32_t s_last_wt_log_ms;
 
 static int cmd_adc(int argc, char **argv)
 {
@@ -396,11 +433,55 @@ static int cmd_stream(int argc, char **argv)
     return 1;
 }
 
+static void console_pause_repl(void);
+static void console_resume_repl(void);
+
+static volatile bool s_cal_wizard_busy;
+
+static void cal_wizard_task(void *arg)
+{
+    uint32_t delay_ms = (uint32_t)(uintptr_t)arg;
+
+    if (delay_ms > 0U) {
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    console_pause_repl();
+    esp_err_t err = run_scale_calibration();
+    console_resume_repl();
+    s_last_wt_log_ms = 0;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Calibration incomplete; type 'cal' when ready");
+    }
+    s_cal_wizard_busy = false;
+    vTaskDelete(NULL);
+}
+
+static bool schedule_cal_wizard(uint32_t delay_ms)
+{
+    if (s_cal_wizard_busy) {
+        return false;
+    }
+    s_cal_wizard_busy = true;
+    if (xTaskCreate(cal_wizard_task, "cal_wiz", 8192, (void *)(uintptr_t)delay_ms, 5, NULL) != pdPASS) {
+        s_cal_wizard_busy = false;
+        return false;
+    }
+    return true;
+}
+
 static int cmd_cal(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    return (run_scale_calibration() == ESP_OK) ? 0 : 1;
+
+    if (!schedule_cal_wizard(0U)) {
+        printf("Calibration already running (or start failed).\n");
+        return 1;
+    }
+    return 0;
 }
 
 static int cmd_filter(int argc, char **argv)
@@ -562,7 +643,41 @@ static void register_console_commands(void)
     }
 }
 
-static esp_console_repl_t *s_console_repl = NULL;
+static void console_pause_repl(void)
+{
+    s_console_repl_paused_for_cal = false;
+    if (s_console_repl != NULL && s_console_repl_running) {
+        esp_err_t err = esp_console_stop_repl(s_console_repl);
+        if (err == ESP_OK) {
+            s_console_repl_paused_for_cal = true;
+            s_console_repl_running = false;
+            vTaskDelay(pdMS_TO_TICKS(200));
+        } else {
+            ESP_LOGW(TAG, "esp_console_stop_repl: %s (cal uses stdin anyway)", esp_err_to_name(err));
+        }
+    }
+}
+
+static void console_resume_repl(void)
+{
+    if (s_console_repl == NULL) {
+        return;
+    }
+    if (s_console_repl_paused_for_cal && !s_console_repl_running) {
+        esp_err_t err = esp_console_start_repl(s_console_repl);
+        if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+            s_console_repl_running = true;
+        } else {
+            ESP_LOGW(TAG, "esp_console_start_repl: %s", esp_err_to_name(err));
+        }
+    } else if (!s_console_repl_paused_for_cal) {
+        s_console_repl_running = true;
+    }
+    s_console_repl_paused_for_cal = false;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    printf("\n--- act1> ready (type 'stream off' if weight lines hide the prompt) ---\n");
+    fflush(stdout);
+}
 
 static void console_init_device(void)
 {
@@ -591,6 +706,7 @@ static void start_console_repl(void)
     console_init_device();
     register_console_commands();
     ESP_ERROR_CHECK(esp_console_start_repl(s_console_repl));
+    s_console_repl_running = true;
     printf("\nConsole ready. stream on|quiet|stats, cal, filter, adc, regs, help\n");
 }
 
@@ -632,14 +748,9 @@ static void ads1235_read_task(void *arg)
     while (1) {
         if (s_cal_in_progress) {
             vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
+        } else {
         esp_err_t err = ads1235_read_raw_blocking(&s_ads1235, 1500, &raw);
         if (err == ESP_OK) {
-            if (wdt_registered) {
-                esp_task_wdt_reset();
-            }
             if (s_weight_stream && s_cal.valid) {
                 raw_roll_push(raw);
                 const float latest_g = raw_to_grams(raw);
@@ -654,7 +765,11 @@ static void ads1235_read_task(void *arg)
                 weight_get_stats(&st);
 
                 if (s_weight_log_quiet) {
-                    ESP_LOGI(TAG, "wt=%ld g", wt_g);
+                    const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+                    if ((now_ms - s_last_wt_log_ms) >= 1000U) {
+                        s_last_wt_log_ms = now_ms;
+                        ESP_LOGI(TAG, "wt=%ld g", wt_g);
+                    }
                 } else if (s_weight_log_verbose) {
                     weight_config_t wcfg;
                     weight_get_config(&wcfg);
@@ -673,8 +788,12 @@ static void ads1235_read_task(void *arg)
                         log_weight_stats_block();
                     }
                 } else {
-                    ESP_LOGI(TAG, "raw=%ld  wt=%ld g  %s",
-                             (long)use_raw, wt_g, weight_mode_label(&d));
+                    const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+                    if ((now_ms - s_last_wt_log_ms) >= 1000U) {
+                        s_last_wt_log_ms = now_ms;
+                        ESP_LOGI(TAG, "raw=%ld  wt=%ld g  %s",
+                                 (long)use_raw, wt_g, weight_mode_label(&d));
+                    }
                 }
             } else if (s_adc_stream_log) {
                 ESP_LOGI(TAG, "ADS1235 raw: %ld  Vdiff: %.4f mV  inst_if_cal=%.3f g",
@@ -685,6 +804,11 @@ static void ads1235_read_task(void *arg)
             ESP_LOGW(TAG, "ADS1235 read failed: %s", esp_err_to_name(err));
         }
         vTaskDelay(pdMS_TO_TICKS(10));
+        }
+
+        if (wdt_registered) {
+            esp_task_wdt_reset();
+        }
     }
 }
 
@@ -745,12 +869,6 @@ void app_main(void)
     ESP_ERROR_CHECK(ads1235_init(&adc_cfg, &s_ads1235));
     ESP_ERROR_CHECK(ads1235_default_init(&s_ads1235));
 
-    console_init_device();
-    ESP_LOGI(TAG, "Calibration starts in 3 s (empty scale, then span weight)...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    if (run_scale_calibration() != ESP_OK) {
-        ESP_LOGW(TAG, "Calibration incomplete; type 'cal' when ready");
-    }
     xTaskCreate(ads1235_read_task, "ads1235", 4096, NULL, 5, NULL);
 
     // Initialize Ethernet driver
@@ -810,6 +928,11 @@ void app_main(void)
     }
 
     start_console_repl();
+
+    ESP_LOGI(TAG, "Calibration starts in 3 s (empty scale, then span weight)...");
+    if (!schedule_cal_wizard(3000U)) {
+        ESP_LOGW(TAG, "Could not schedule boot calibration; type 'cal' when ready");
+    }
 
 #if CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S >= 0
     // For demonstration purposes, wait and then deinit Ethernet network

@@ -1,4 +1,2 @@
-# COM17 / external USB-UART: primary console. USB-JTAG can mirror logs if connected.
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+# ACT1-ROBIN defaults are in config/act1-robin.defaults (loaded from CMakeLists.txt).
+# Edit that file for W5500 pins, Wi-Fi, console, etc.

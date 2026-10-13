@@ -24,6 +24,10 @@ build/
 *.out
 *.exe # For any host-side utilities compiled on Windows
 
+# Local ACT1 reference clone (display source copied into main/)
+_act1_clone/
+_act1_*
+
 # ESP-IDF specific build outputs
 *.bin
 *.elf
